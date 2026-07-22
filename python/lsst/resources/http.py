@@ -61,6 +61,7 @@ from lsst.utils.timer import time_this
 from ._resourceHandles import ResourceHandleProtocol
 from ._resourceHandles._httpResourceHandle import HttpReadResourceHandle, parse_content_range_header
 from ._resourcePath import ResourceInfo, ResourcePath
+from .cadc import mark_datastore_authenticated_path, uses_datastore_authentication
 from .utils import _get_num_workers, get_tempdir
 
 if TYPE_CHECKING:
@@ -429,6 +430,9 @@ def _get_dav_and_server_headers(path: ResourcePath | str) -> tuple[str | None, s
         if not isinstance(path, HttpResourcePath):
             path = HttpResourcePath(path)
 
+        if uses_datastore_authentication(path):
+            return (None, None)
+
         config = HttpResourcePathConfig()
         with SessionStore(config=config).get(path) as session:
             resp = session.options(
@@ -761,7 +765,10 @@ class HttpResourcePath(ResourcePath):
 
     @staticmethod
     def create_http_resource_path(
-        path: str, *, extra_headers: dict[str, str] | None = None
+        path: str,
+        *,
+        extra_headers: dict[str, str] | None = None,
+        datastore_authenticated: bool = False,
     ) -> HttpResourcePath:
         """Create an instance of `HttpResourcePath` with additional
         HTTP-specific configuration.
@@ -775,6 +782,10 @@ class HttpResourcePath(ResourcePath):
             by this `ResourcePath`.  These override any headers that may be
             generated internally by `HttpResourcePath` (e.g. authentication
             headers).
+        datastore_authenticated : `bool`, optional
+            If `True`, mark the path for direct authenticated datastore reads
+            and skip WebDAV server probing. Used by remote-butler clients when
+            the server specifies ``auth="datastore"`` for artifact URLs.
 
         Returns
         -------
@@ -793,6 +804,8 @@ class HttpResourcePath(ResourcePath):
         instance = ResourcePath(str(path))
         assert isinstance(instance, HttpResourcePath)
         instance._extra_headers = extra_headers
+        if datastore_authenticated:
+            mark_datastore_authenticated_path(instance)
         return instance
 
     # WebDAV servers known to be able to sign URLs. The values are lowercased
@@ -903,6 +916,11 @@ class HttpResourcePath(ResourcePath):
         sending a single OPTIONS request to the remote server and
         saving the results.
         """
+        if uses_datastore_authentication(self):
+            self._is_webdav = False
+            self._server = None
+            return
+
         # Retrieve the "DAV" and the "Server" headers for the root URL of this
         # path
         dav_header, server_header = _get_dav_and_server_headers(self.root_uri())
@@ -1407,6 +1425,9 @@ class HttpResourcePath(ResourcePath):
         """
         if fsspec is None:
             return super().to_fsspec()
+
+        if uses_datastore_authentication(self):
+            return fsspec.url_to_fs(self.geturl(), client_kwargs={"headers": self._extra_headers})
 
         if not self.is_webdav_endpoint or self.server not in HttpResourcePath.SUPPORTED_URL_SIGNERS:
             return fsspec.url_to_fs(self.geturl(), client_kwargs={"headers": self._extra_headers})
@@ -2054,6 +2075,11 @@ class HttpResourcePath(ResourcePath):
     def _copy_extra_attributes(self, original_uri: ResourcePath) -> None:
         assert isinstance(original_uri, HttpResourcePath)
         self._extra_headers = original_uri._extra_headers
+        if uses_datastore_authentication(original_uri):
+            mark_datastore_authenticated_path(self)
+        elif hasattr(original_uri, "_is_webdav"):
+            self._is_webdav = original_uri._is_webdav
+            self._server = original_uri._server
 
 
 def _dump_response(resp: requests.Response) -> None:

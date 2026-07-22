@@ -44,6 +44,7 @@ from lsst.resources._resourceHandles._httpResourceHandle import (
     HttpReadResourceHandle,
     parse_content_range_header,
 )
+from lsst.resources.cadc import uses_datastore_authentication
 from lsst.resources.http import (
     BearerTokenAuth,
     HttpResourcePath,
@@ -129,6 +130,32 @@ class GenericHttpTestCase(GenericTestCase, unittest.TestCase):
         self.assertEqual(replacement._extra_headers, {"Authorization": "Bearer my-token"})
         copy = ResourcePath(path, forceDirectory=True)
         self.assertEqual(copy._extra_headers, {"Authorization": "Bearer my-token"})
+
+    @responses.activate
+    def test_datastore_authenticated_skips_webdav_probe(self):
+        _get_dav_and_server_headers.cache_clear()
+        url = "http://test.example/any/storage/path/file.parq"
+        path = HttpResourcePath.create_http_resource_path(
+            url,
+            extra_headers={"Authorization": "Bearer my-token"},
+            datastore_authenticated=True,
+        )
+        self.assertTrue(uses_datastore_authentication(path))
+        self.assertFalse(path.is_webdav_endpoint)
+
+        root = path.root_uri()
+        self.assertTrue(uses_datastore_authentication(root))
+
+        dav_header, server_header = _get_dav_and_server_headers(root)
+        self.assertIsNone(dav_header)
+        self.assertIsNone(server_header)
+
+        fs, fsspec_path = path.to_fsspec()
+        self.assertEqual(fsspec_path, url)
+        self.assertEqual(fs.client_kwargs.get("headers"), {"Authorization": "Bearer my-token"})
+
+        replacement = path.replace(forceDirectory=True)
+        self.assertTrue(uses_datastore_authentication(replacement))
 
     @responses.activate
     def test_get_info(self):
