@@ -27,3 +27,4 @@ build/*
 dist/*
 python/*.dist-info/
 doc/api/
+*.DS_Store
